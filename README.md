@@ -5,5 +5,5 @@ pretrained weights are here(https://drive.google.com/file/d/1uLtZjXmMUPfqWSdmw_B
 - just unzip them to root . 
 - run rm_test.sh 
 
-i have already exposed the model, 
+@shahbaz .i have already exposed the model, 
 modify it for videos . 
