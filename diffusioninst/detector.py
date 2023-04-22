@@ -34,6 +34,8 @@ from .util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 from .util.misc import nested_tensor_from_tensor_list
 from detectron2.structures.masks import polygons_to_bitmask,BitMasks
 
+from einops import rearrange, reduce, repeat
+
 __all__ = ["DiffusionInst"]
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
@@ -230,7 +232,7 @@ class DiffusionInst(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
-        print("model constructior")
+        print("model constructor")
         self.device = torch.device(cfg.MODEL.DEVICE)
 
         self.in_features = cfg.MODEL.ROI_HEADS.IN_FEATURES
@@ -351,9 +353,10 @@ class DiffusionInst(nn.Module):
 
     @torch.no_grad()
     def ddim_sample(self, batched_inputs, backbone_feats, images_whwh, images, clip_denoised=True, do_postprocess=True):
-        print("in ddim sampel")
-        batch = images_whwh.shape[0]
-        shape = (batch, self.num_proposals, 4)
+        print("in ddim sample")
+        # images_whwh = rearrange(images_whwh, 'b t whwh -> (b t) whwh')
+        batch = images_whwh.shape[:2]
+        shape = (*batch, self.num_proposals, 4)
         total_timesteps, sampling_timesteps, eta, objective = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
         #import pdb;pdb.set_trace()
         # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
@@ -368,53 +371,54 @@ class DiffusionInst(nn.Module):
         ensemble_score, ensemble_label, ensemble_coord,ensemble_kernel = [], [], [], []
         x_start = None
         for time, time_next in time_pairs:
-            time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
+            time_cond = torch.full((*batch,), time, device=self.device, dtype=torch.long)
             self_cond = x_start if self.self_condition else None
             #import pdb;pdb.set_trace()
-            preds, outputs_class, outputs_coord,outputs_kernel,mask_feat = self.model_predictions(backbone_feats, images_whwh, img, time_cond,self_cond, clip_x_start=clip_denoised)
-            pred_noise, x_start = preds.pred_noise, preds.pred_x_start
+            for i in range(len(backbone_feats)):
+                preds, outputs_class, outputs_coord,outputs_kernel,mask_feat = self.model_predictions(backbone_feats[i], images_whwh[i], img[i], time_cond[i],self_cond, clip_x_start=clip_denoised)
+                pred_noise, x_start = preds.pred_noise, preds.pred_x_start
 
-            if self.box_renewal:  # filter
-                #true
-                score_per_image, box_per_image = outputs_class[-1][0], outputs_coord[-1][0]
-                threshold = 0.5
-                score_per_image = torch.sigmoid(score_per_image)
-                value, _ = torch.max(score_per_image, -1, keepdim=False)
-                keep_idx = value > threshold
-                num_remain = torch.sum(keep_idx)
+                if self.box_renewal:  # filter
+                    #true
+                    score_per_image, box_per_image = outputs_class[-1][0], outputs_coord[-1][0]
+                    threshold = 0.5
+                    score_per_image = torch.sigmoid(score_per_image)
+                    value, _ = torch.max(score_per_image, -1, keepdim=False)
+                    keep_idx = value > threshold
+                    num_remain = torch.sum(keep_idx)
 
-                pred_noise = pred_noise[:, keep_idx, :]
-                x_start = x_start[:, keep_idx, :]
-                img = img[:, keep_idx, :]
-            if time_next < 0:
-                img = x_start
-                continue
+                    pred_noise = pred_noise[:, keep_idx, :]
+                    x_start = x_start[:, keep_idx, :]
+                    img = img[:, keep_idx, :]
+                if time_next < 0:
+                    img = x_start
+                    continue
 
-            alpha = self.alphas_cumprod[time]
-            alpha_next = self.alphas_cumprod[time_next]
+                alpha = self.alphas_cumprod[time]
+                alpha_next = self.alphas_cumprod[time_next]
 
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
+                sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+                c = (1 - alpha_next - sigma ** 2).sqrt()
 
-            noise = torch.randn_like(img)
+                noise = torch.randn_like(img)
 
-            img = x_start * alpha_next.sqrt() + \
-                  c * pred_noise + \
-                  sigma * noise
+                img = x_start * alpha_next.sqrt() + \
+                    c * pred_noise + \
+                    sigma * noise
 
-            if self.box_renewal:  # filter
-                # replenish with randn boxes
-                img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
-            if self.use_ensemble and self.sampling_timesteps > 1:
-                box_pred_per_image, scores_per_image, labels_per_image, kernels_per_image = self.inference(outputs_class[-1],
-                                                                                        outputs_coord[-1],
-                                                                                        outputs_kernel[-1], 
-                                                                                        mask_feat,
-                                                                                        images.image_sizes)
-                ensemble_score.append(scores_per_image)
-                ensemble_label.append(labels_per_image)
-                ensemble_coord.append(box_pred_per_image)
-                ensemble_kernel.append(kernels_per_image)
+                if self.box_renewal:  # filter
+                    # replenish with randn boxes
+                    img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
+                if self.use_ensemble and self.sampling_timesteps > 1:
+                    box_pred_per_image, scores_per_image, labels_per_image, kernels_per_image = self.inference(outputs_class[-1],
+                                                                                            outputs_coord[-1],
+                                                                                            outputs_kernel[-1], 
+                                                                                            mask_feat,
+                                                                                            images.image_sizes)
+                    ensemble_score.append(scores_per_image)
+                    ensemble_label.append(labels_per_image)
+                    ensemble_coord.append(box_pred_per_image)
+                    ensemble_kernel.append(kernels_per_image)
         
         if self.use_ensemble and self.sampling_timesteps > 1:
             # print("if1")
@@ -455,15 +459,17 @@ class DiffusionInst(nn.Module):
             result.pred_masks = mask_logits
             results = [result]
         else:
-            print("if2")
+            print("no ensemble, so ...")
             #import pdb;pdb.set_trace()
             output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
             box_cls = output["pred_logits"]
+            box_cls = rearrange(box_cls, '(b t) n c -> b t n c', b=len(images.image_sizes))
             box_pred = output["pred_boxes"]
-            print("getting output")
-            results = self.inference(box_cls, box_pred, outputs_kernel[-1], mask_feat,images.image_sizes)
+            box_pred = rearrange(box_pred, '(b t) n c -> b t n c', b=len(images.image_sizes))
+            print("getting output ...")
+            results = self.inference(box_cls, box_pred, rearrange(outputs_kernel[-1], '(b t) n w -> b t n w', b=len(images.image_sizes)), rearrange(mask_feat, 'heads (b t) n w -> heads b t n w', b=len(images.image_sizes)), images.image_sizes)
         if do_postprocess:
-            print("poseprocess")
+            print("post processing ...")
             processed_results = []
             for results_per_image, input_per_image, image_size in zip(results, batched_inputs, images.image_sizes):
                 #import pdb;pdb.set_trace()
@@ -507,11 +513,12 @@ class DiffusionInst(nn.Module):
 
         # Feature Extraction.
         print("list of tensors", images.tensor.shape)
-        src = self.backbone(images.tensor)
-        features = list()
+        src = self.backbone(rearrange(images.tensor, 'b t c h w -> (b t) c h w'))
+        features = [[] for _ in range(images.tensor.shape[0])]
         for f in self.in_features:
-            feature = src[f]
-            features.append(feature)
+            feature = rearrange(src[f], '(b t) x y z -> b t x y z', b=images.tensor.shape[0])
+            for i, per_vid_feature in enumerate(feature):
+                features[i].append(per_vid_feature)
 
         # Prepare Proposals.
         if not self.training:
@@ -686,7 +693,7 @@ class DiffusionInst(nn.Module):
         Returns:
             results (List[Instances]): a list of #images elements.
         """
-        assert len(box_cls) == len(image_sizes)
+        assert len(box_cls) == len(image_sizes), 'fine'
         results = []
         
         if self.use_focal or self.use_fed_loss:
@@ -698,7 +705,7 @@ class DiffusionInst(nn.Module):
                     scores, box_pred, image_sizes,kernel, mask_feat
             )):
                 result = Instances(image_size)
-                scores_per_image, topk_indices = scores_per_image.flatten(0, 1).topk(self.num_proposals, sorted=False)
+                scores_per_image, topk_indices = scores_per_image.flatten(1, 2).topk(self.num_proposals, sorted=False)
                 labels_per_image = labels[topk_indices]
                 ker = ker.view(-1, 1, 153).repeat(1, self.num_classes, 1).view(-1, 153)
                 #torch.Size([500, 4])
@@ -777,10 +784,15 @@ class DiffusionInst(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         images_whwh = list()
+        print('total batch size: ', len(batched_inputs))
+        print('image shapes:')
         for bi in batched_inputs:
-            h, w = bi["image"].shape[-2:]
-            print("bi", bi["image"].shape)
-            images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
-        images_whwh = torch.stack(images_whwh)
+            instance_images_whwh = list()
+            for img in bi["image"]:
+                h, w = img.shape[-2:]
+                # print(img.shape)
+                instance_images_whwh.append([w, h, w, h])
+            images_whwh.append(instance_images_whwh)
+        images_whwh = torch.tensor(images_whwh, dtype=torch.float32, device=self.device)
 
         return images, images_whwh
