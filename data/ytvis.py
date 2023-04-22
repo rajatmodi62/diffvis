@@ -11,7 +11,9 @@ from fvcore.common.timer import Timer
 
 from detectron2.structures import Boxes, BoxMode, PolygonMasks
 from detectron2.data import DatasetCatalog, MetadataCatalog
-
+from pycocotools.ytvos import YTVOS
+from pathlib import Path
+import pathlib
 """
 This file contains functions to parse YTVIS dataset of
 COCO-format annotations into dicts in "Detectron2 format".
@@ -85,6 +87,7 @@ def _get_ytvis_2019_instances_meta():
 def load_ytvis_json(json_file, image_root, dataset_name=None, extra_annotation_keys=None):
     from pycocotools.ytvos import YTVOS
 
+    print("loading json file", json_file)
     timer = Timer()
     json_file = PathManager.get_local_path(json_file)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -231,6 +234,27 @@ def register_ytvis_instances(name, metadata, json_file, image_root):
     MetadataCatalog.get(name).set(
         json_file=json_file, image_root=image_root, evaluator_type="ytvis", **metadata
     )
+    # self.cat_ids = self.ytvos.getCatIds()
+    #     self.vid_ids = self.ytvos.getVidIds()
+    #     self.vid_infos = []
+    #     for i in self.vid_ids:
+    #         info = self.ytvos.loadVids([i])[0]
+    #         info['filenames'] = info['file_names']
+    #         self.vid_infos.append(info)
+    # p = pathlib.Path().resolve()
+    # print("patj", p)
+    ytvos =  YTVOS(json_file)
+    MetadataCatalog.get(name).cat_ids = ytvos.getCatIds()
+    MetadataCatalog.get(name).vid_ids = ytvos.getVidIds()
+    print("defining ytvos",name)
+    MetadataCatalog.get(name).ytvos = ytvos
+    vid_ids = ytvos.getVidIds()
+    vid_infos = []
+    for i in vid_ids:
+            info = ytvos.loadVids([i])[0]
+            info['filenames'] = info['file_names']
+            vid_infos.append(info)
+    MetadataCatalog.get(name).vid_infos = vid_infos
 
 
 if __name__ == "__main__":
@@ -250,27 +274,27 @@ if __name__ == "__main__":
     json_file = "./datasets/ytvis2019/annotations/train.json"
     image_root = "/home/rmodi/ssd/shah/diffvis/datasets/ytvis2019/train/JPEGImages"
     dicts = load_ytvis_json(json_file, image_root, dataset_name="ytvis_2019_train")
-    logger.info("Done loading {} samples.".format(len(dicts)))
+    # logger.info("Done loading {} samples.".format(len(dicts)))
 
-    dirname = "ytvis-data-vis"
-    os.makedirs(dirname, exist_ok=True)
+    # dirname = "ytvis-data-vis"
+    # os.makedirs(dirname, exist_ok=True)
 
-    def extract_frame_dic(dic, frame_idx):
-        import copy
-        frame_dic = copy.deepcopy(dic)
-        annos = frame_dic.get("annotations", None)
-        if annos:
-            frame_dic["annotations"] = annos[frame_idx]
+    # def extract_frame_dic(dic, frame_idx):
+    #     import copy
+    #     frame_dic = copy.deepcopy(dic)
+    #     annos = frame_dic.get("annotations", None)
+    #     if annos:
+    #         frame_dic["annotations"] = annos[frame_idx]
 
-        return frame_dic
-    print("hello")
-    for done,d in enumerate(dicts):
-        print("done", done, "/", len(dicts))
-        vid_name = d["file_names"][0].split('/')[-2]
-        os.makedirs(os.path.join(dirname, vid_name), exist_ok=True)
-        for idx, file_name in enumerate(d["file_names"]):
-            img = np.array(Image.open(file_name))
-            visualizer = Visualizer(img, metadata=meta)
-            vis = visualizer.draw_dataset_dict(extract_frame_dic(d, idx))
-            fpath = os.path.join(dirname, vid_name, file_name.split('/')[-1])
-            vis.save(fpath)
+    #     return frame_dic
+    # print("hello")
+    # for done,d in enumerate(dicts):
+    #     print("done", done, "/", len(dicts))
+    #     vid_name = d["file_names"][0].split('/')[-2]
+    #     os.makedirs(os.path.join(dirname, vid_name), exist_ok=True)
+    #     for idx, file_name in enumerate(d["file_names"]):
+    #         img = np.array(Image.open(file_name))
+    #         visualizer = Visualizer(img, metadata=meta)
+    #         vis = visualizer.draw_dataset_dict(extract_frame_dic(d, idx))
+    #         fpath = os.path.join(dirname, vid_name, file_name.split('/')[-1])
+    #         vis.save(fpath)
